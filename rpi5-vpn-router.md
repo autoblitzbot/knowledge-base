@@ -70,7 +70,176 @@ Or use [Raspberry Pi Imager](https://www.raspberrypi.com/software/): "Use custom
 6. In your browser: **http://192.168.1.1** → LuCI web interface
 7. First step: set a root password: **System → Administration → Router Password**
 
+> **Direct laptop-to-Pi connection note:** On some systems, a direct Ethernet connection to the Pi on first boot may not get a DHCP lease automatically. If that happens, set a temporary static IP on your computer's Ethernet interface:
+>
+> - IP: `192.168.1.2`
+> - Netmask: `255.255.255.0`
+> - Gateway: `192.168.1.1`
+>
+> Then browse to `http://192.168.1.1`.
+
+### Reproducible Direct `eth0` Setup From a Linux Laptop
+
+This is a tested direct-connection workflow for a fresh OpenWrt boot when the USB Ethernet adapter is not working yet.
+
+1. Disconnect the USB Ethernet adapter from the Pi.
+2. Connect the laptop directly to the Pi's built-in `eth0` port.
+3. Power on the Pi and wait 60-90 seconds.
+4. On the laptop, check the interface and routing state:
+
+```bash
+ip -brief link
+ip -brief addr
+ip route
+nmcli device status
+```
+
+5. If the Ethernet interface does not already have `192.168.1.2/24`, set a temporary static IPv4 address with NetworkManager:
+
+```bash
+nmcli connection modify "Wired connection 1" ipv4.method manual ipv4.addresses 192.168.1.2/24 ipv4.gateway 192.168.1.1
+nmcli connection down "Wired connection 1"
+nmcli connection up "Wired connection 1"
+```
+
+6. Verify that the Pi answers on the default OpenWrt address:
+
+```bash
+ping -c 3 -W 2 192.168.1.1
+curl -I --max-time 5 http://192.168.1.1
+ip neigh show dev enp0s31f6
+```
+
+Expected results:
+
+- `ping` returns replies from `192.168.1.1`
+- `curl` returns `HTTP/1.1 200 OK`
+- `ip neigh` shows a MAC address for `192.168.1.1`
+
+7. Open LuCI in a browser:
+
+```text
+http://192.168.1.1
+```
+
+8. After setting the root password, verify SSH access:
+
+```bash
+ssh root@192.168.1.1
+```
+
+If you want to automate the SSH login for testing, use `sshpass` with your own password:
+
+```bash
+sshpass -p '<PASSWORD>' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@192.168.1.1
+```
+
+9. Once logged into the Pi, verify the fresh-boot network state:
+
+```bash
+uname -a
+uci get system.@system[0].hostname
+ip link show
+ip addr show
+```
+
+On a fresh OpenWrt boot, `eth0` is typically attached to `br-lan`, and `br-lan` holds `192.168.1.1/24`.
+
 ## 2. Network Configuration
+
+### Install the USB Ethernet Driver
+
+Before configuring `eth1`, install the driver for the USB adapter chipset.
+
+On older OpenWrt releases, the package manager is usually `opkg`. On OpenWrt `25.12.2`, the package manager is `apk`.
+
+For the recommended RTL8153 adapters:
+
+```bash
+opkg update
+opkg install kmod-usb-net-rtl8152
+reboot
+```
+
+After reboot, verify that the adapter appears as a network interface:
+
+```bash
+ip link show
+lsusb
+```
+
+If you are using an AX88179-based adapter instead, install the matching ASIX driver package rather than `kmod-usb-net-rtl8152`.
+
+### Tested AX88179 Install On OpenWrt 25.12.2
+
+The USB adapter used during testing identified as:
+
+```bash
+dmesg | grep -i -E "usb|ax88179|asix"
+```
+
+Relevant output:
+
+```text
+Product: AX88179
+Manufacturer: ASIX Elec. Corp.
+```
+
+Because the Pi was connected directly to a laptop on `eth0` and had no upstream route yet, the driver packages were downloaded on the laptop and copied to the Pi manually.
+
+On the Pi, verify the OS release and package manager first:
+
+```bash
+cat /etc/openwrt_release
+which apk
+```
+
+On the laptop, download the required packages for OpenWrt `25.12.2` / kernel `6.12.74`:
+
+```bash
+mkdir -p downloads
+curl -L -o downloads/kmod-net-selftests-6.12.74-r1.apk "https://downloads.openwrt.org/releases/25.12.2/targets/bcm27xx/bcm2712/kmods/6.12.74-1-c48576c95291bf2086b1569f64c9c7f0/kmod-net-selftests-6.12.74-r1.apk"
+curl -L -o downloads/kmod-phylink-6.12.74-r1.apk "https://downloads.openwrt.org/releases/25.12.2/targets/bcm27xx/bcm2712/kmods/6.12.74-1-c48576c95291bf2086b1569f64c9c7f0/kmod-phylink-6.12.74-r1.apk"
+curl -L -o downloads/kmod-phy-ax88796b-6.12.74-r1.apk "https://downloads.openwrt.org/releases/25.12.2/targets/bcm27xx/bcm2712/kmods/6.12.74-1-c48576c95291bf2086b1569f64c9c7f0/kmod-phy-ax88796b-6.12.74-r1.apk"
+curl -L -o downloads/kmod-usb-net-asix-6.12.74-r1.apk "https://downloads.openwrt.org/releases/25.12.2/targets/bcm27xx/bcm2712/kmods/6.12.74-1-c48576c95291bf2086b1569f64c9c7f0/kmod-usb-net-asix-6.12.74-r1.apk"
+curl -L -o downloads/kmod-usb-net-asix-ax88179-6.12.74-r1.apk "https://downloads.openwrt.org/releases/25.12.2/targets/bcm27xx/bcm2712/kmods/6.12.74-1-c48576c95291bf2086b1569f64c9c7f0/kmod-usb-net-asix-ax88179-6.12.74-r1.apk"
+```
+
+Copy them to the Pi over SSH without `scp`:
+
+```bash
+dd if=downloads/kmod-net-selftests-6.12.74-r1.apk | ssh root@192.168.1.1 'dd of=/tmp/kmod-net-selftests-6.12.74-r1.apk'
+dd if=downloads/kmod-phylink-6.12.74-r1.apk | ssh root@192.168.1.1 'dd of=/tmp/kmod-phylink-6.12.74-r1.apk'
+dd if=downloads/kmod-phy-ax88796b-6.12.74-r1.apk | ssh root@192.168.1.1 'dd of=/tmp/kmod-phy-ax88796b-6.12.74-r1.apk'
+dd if=downloads/kmod-usb-net-asix-6.12.74-r1.apk | ssh root@192.168.1.1 'dd of=/tmp/kmod-usb-net-asix-6.12.74-r1.apk'
+dd if=downloads/kmod-usb-net-asix-ax88179-6.12.74-r1.apk | ssh root@192.168.1.1 'dd of=/tmp/kmod-usb-net-asix-ax88179-6.12.74-r1.apk'
+```
+
+Install them locally on the Pi:
+
+```bash
+apk add --allow-untrusted \
+  /tmp/kmod-net-selftests-6.12.74-r1.apk \
+  /tmp/kmod-phylink-6.12.74-r1.apk \
+  /tmp/kmod-phy-ax88796b-6.12.74-r1.apk \
+  /tmp/kmod-usb-net-asix-6.12.74-r1.apk \
+  /tmp/kmod-usb-net-asix-ax88179-6.12.74-r1.apk
+```
+
+Verify that the adapter appears as `eth1`:
+
+```bash
+ip link show
+dmesg | grep -i -E "asix|ax88179|eth1|usb"
+```
+
+Expected kernel message:
+
+```text
+ax88179_178a ... eth1: register 'ax88179_178a' ... ASIX AX88179 USB 3.0 Gigabit Ethernet
+```
+
+If you factory-reset the Pi or reflash OpenWrt, these packages do not persist and must be installed again.
 
 ### Identify Interfaces
 
@@ -95,22 +264,79 @@ dmesg | grep -i eth
 | Device | `eth0` |
 | Firewall zone | `wan` |
 
+If upstream DHCP does not respond, configure a static WAN address instead. Tested fallback configuration:
+
+```bash
+uci set network.wan.proto='static'
+uci set network.wan.ipaddr='192.168.2.250'
+uci set network.wan.netmask='255.255.255.0'
+uci set network.wan.gateway='192.168.2.1'
+uci del network.wan.dns 2>/dev/null || true
+uci add_list network.wan.dns='1.1.1.1'
+uci add_list network.wan.dns='8.8.8.8'
+uci commit network
+/etc/init.d/network restart
+```
+
+Verify WAN connectivity:
+
+```bash
+ip addr show eth0
+ip route show
+ping -c 3 192.168.2.1
+ping -c 3 1.1.1.1
+nslookup openwrt.org 127.0.0.1
+```
+
+### Tested UCI Cutover (`eth0` -> `wan`, `eth1` -> `lan`)
+
+The tested command sequence to move the built-in port to `wan` and the USB adapter to `lan` was:
+
+```bash
+uci batch <<'EOF'
+set network.@device[0].ports='eth1'
+set network.lan.device='br-lan'
+set network.lan.ipaddr='192.168.3.1/24'
+set network.lan.proto='static'
+set network.wan=interface
+set network.wan.device='eth0'
+set network.wan.proto='dhcp'
+set firewall.@zone[1].network='wan'
+commit network
+commit firewall
+EOF
+/etc/init.d/network restart
+/etc/init.d/firewall restart
+```
+
+**Important:** As soon as this is applied, management access moves from `eth0` to the USB adapter on `eth1`. If your laptop is still plugged into `eth0`, you will immediately lose access to `192.168.3.1` until you move the cable to the USB adapter port.
+
 ### LAN Interface (eth1 → internal network)
 
 The default `lan` interface is on the `br-lan` bridge. Modify it:
+
+If you need to move an already-running OpenWrt router from `192.168.1.1` to a non-conflicting LAN subnet before reassigning the LAN device, use a different private subnet such as `192.168.3.1`:
+
+```bash
+uci set network.lan.ipaddr="192.168.3.1/24"
+uci commit network
+/etc/init.d/network reload
+```
+
+After the reload, reconnect to the router on `192.168.3.1`.
 
 **Network → Interfaces → LAN → Edit:**
 
 | Field | Value |
 |-------|-------|
 | Protocol | Static address |
-| IPv4 address | `192.168.2.1` |
+| IPv4 address | `192.168.3.1` |
 | Netmask | `255.255.255.0` |
 | Device | `eth1` (USB adapter) |
 | DHCP | Enabled (default range is fine) |
 | Firewall zone | `lan` |
 
-> **Important:** If your ISP router also uses 192.168.1.x, assign a different subnet to the LAN (e.g., 192.168.2.0/24), otherwise there will be a conflict.
+> **Important:** If your upstream router already uses `192.168.2.0/24`, assign a different subnet to the Pi LAN such as `192.168.3.0/24`, otherwise there will be a conflict.
 
 ### Firewall
 
@@ -123,7 +349,7 @@ Save: **Save & Apply**.
 
 ### Test
 
-A device connected to the LAN port should receive a 192.168.2.x address via DHCP and be able to reach the internet through the ISP router.
+A device connected to the LAN port should receive a `192.168.3.x` address via DHCP and be able to reach the internet through the upstream router.
 
 ```bash
 # From the Pi:
@@ -136,9 +362,28 @@ ping -c 3 8.8.8.8
 
 ### Package Installation
 
+On OpenWrt releases that still use `opkg`:
+
 ```bash
 opkg update
 opkg install tailscale
+```
+
+On OpenWrt `25.12.2`, the tested installation used `apk` and required `kmod-tun`.
+
+If the Pi does not yet have working internet access, download the packages on another machine:
+
+```bash
+curl -L -o downloads/kmod-tun-6.12.74-r1.apk "https://downloads.openwrt.org/releases/25.12.2/targets/bcm27xx/bcm2712/kmods/6.12.74-1-c48576c95291bf2086b1569f64c9c7f0/kmod-tun-6.12.74-r1.apk"
+curl -L -o downloads/tailscale-1.94.1-r1.apk "https://downloads.openwrt.org/releases/25.12.2/packages/aarch64_cortex-a76/packages/tailscale-1.94.1-r1.apk"
+dd if=downloads/kmod-tun-6.12.74-r1.apk | ssh root@192.168.1.1 'dd of=/tmp/kmod-tun-6.12.74-r1.apk'
+dd if=downloads/tailscale-1.94.1-r1.apk | ssh root@192.168.1.1 'dd of=/tmp/tailscale-1.94.1-r1.apk'
+```
+
+Then install locally on the Pi:
+
+```bash
+apk add --allow-untrusted /tmp/kmod-tun-6.12.74-r1.apk /tmp/tailscale-1.94.1-r1.apk
 ```
 
 > **Note:** The Tailscale package takes ~22 MB of space. No issue with a 16GB SD card.
@@ -153,6 +398,33 @@ opkg install tailscale
 # Log in
 tailscale up --accept-routes
 ```
+
+Tested interactive install/login flow on the Pi:
+
+```bash
+apk add tailscale
+tailscale login
+```
+
+After login, verify the assigned Tailscale IPv4 address:
+
+```bash
+tailscale status
+tailscale ip -4
+ip addr show tailscale0
+```
+
+Verify the package install and daemon state:
+
+```bash
+tailscale version
+/etc/init.d/tailscale status
+ip link show tailscale0
+```
+
+During tested offline installation, the service started successfully, but `tailscale up` could not complete until the Pi had a working WAN route and DNS resolution.
+
+If you factory-reset the Pi, `tailscale` and `kmod-tun` are removed and must be reinstalled.
 
 This gives you a link — open it in your browser and log in with your Tailscale account. The Pi will appear in the admin console: [https://login.tailscale.com/admin/machines](https://login.tailscale.com/admin/machines)
 
@@ -171,6 +443,51 @@ This gives you a link — open it in your browser and log in with your Tailscale
 | Allow forward to | `lan`, `wan` |
 
 **Save & Apply.**
+
+Tested UCI firewall setup for router access over Tailscale:
+
+```bash
+uci batch <<'EOF'
+add firewall zone
+set firewall.@zone[-1].name='tailscale'
+set firewall.@zone[-1].device='tailscale0'
+set firewall.@zone[-1].input='ACCEPT'
+set firewall.@zone[-1].output='ACCEPT'
+set firewall.@zone[-1].forward='ACCEPT'
+add firewall forwarding
+set firewall.@forwarding[-1].src='tailscale'
+set firewall.@forwarding[-1].dest='lan'
+add firewall forwarding
+set firewall.@forwarding[-1].src='lan'
+set firewall.@forwarding[-1].dest='tailscale'
+commit firewall
+EOF
+/etc/init.d/firewall restart
+```
+
+`tailscale0` does not need to be added as a normal OpenWrt network interface. Tailscale creates and manages that device itself. In OpenWrt, the required integration point is the firewall zone for the `tailscale0` device.
+
+If LAN clients should egress through a Tailscale exit node, enable masquerading on the `tailscale` zone as well:
+
+```bash
+uci set firewall.@zone[-1].masq='1'
+uci commit firewall
+/etc/init.d/firewall restart
+```
+
+After this, the router itself should be reachable over its Tailscale IP for both SSH and LuCI.
+
+Example tested access pattern:
+
+```bash
+ssh root@<TAILSCALE_IP>
+```
+
+LuCI over Tailscale:
+
+```text
+http://<TAILSCALE_IP>
+```
 
 ## 4. Connecting to a Remote Exit Node
 
@@ -196,11 +513,37 @@ Then in the [Tailscale Admin Console](https://login.tailscale.com/admin/machines
 tailscale exit-node list
 
 # Connect (replace <HOSTNAME> with the exit node's name)
-tailscale set --exit-node=<HOSTNAME>
+tailscale set --exit-node=<HOSTNAME> --exit-node-allow-lan-access=true
 
-# Verify — the Pi's IP should now be the exit node's IP
-curl -s https://ifconfig.me
+# Verify public egress from the Pi
+wget -qO- https://ifconfig.me/ip
 ```
+
+Manual checks that the exit-node routing is active:
+
+```bash
+# Show Tailscale status and current exit-node state
+tailscale status
+
+# Show detailed exit-node status
+tailscale status --json | grep -E 'ExitNode|ExitNodeOption'
+
+# Confirm that LAN access remains enabled while using the exit node
+tailscale debug prefs | grep ExitNodeAllowLANAccess
+
+# Show the Tailscale policy-routing table
+ip route show table all | grep tailscale0
+
+# Show the router's public IP as seen from the internet
+wget -qO- https://ifconfig.me/ip
+```
+
+What to look for:
+
+- `tailscale status` should show the chosen exit node as active
+- `tailscale debug prefs` should show `ExitNodeAllowLANAccess: true`
+- `ip route show table all` should include `default dev tailscale0 table 52`
+- the public IP returned by `ifconfig.me` should match the exit node's egress IP, not the upstream ISP IP
 
 ### Why Does This Work for LAN Clients Too?
 
@@ -276,7 +619,15 @@ lsusb
 ip link show
 ```
 
-If `eth1` is not visible, try plugging in the adapter with the Pi powered off, then boot.
+If the adapter uses the recommended RTL8153 chipset, install the driver and reboot:
+
+```bash
+opkg update
+opkg install kmod-usb-net-rtl8152
+reboot
+```
+
+If `eth1` is still not visible, try plugging in the adapter with the Pi powered off, then boot.
 
 ### Tailscale Won't Connect
 
