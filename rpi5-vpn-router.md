@@ -2,6 +2,18 @@
 
 Build a home VPN router from a Raspberry Pi 5, using OpenWrt and Tailscale. All LAN client traffic exits through a remote Tailscale exit node — no VPN client needed on the clients.
 
+## Table of Contents
+
+1. [Parts List](#parts-list)
+2. [Network Topology](#network-topology)
+3. [Installing OpenWrt](#1-installing-openwrt)
+4. [Network Configuration](#2-network-configuration)
+5. [Installing Tailscale](#3-installing-tailscale)
+6. [Connecting to a Remote Exit Node](#4-connecting-to-a-remote-exit-node)
+7. [Auto-Start and Optimization](#5-auto-start-and-optimization)
+8. [Performance](#performance)
+9. [Troubleshooting](#troubleshooting)
+
 ## Parts List
 
 | Part | Recommendation | Notes |
@@ -576,28 +588,60 @@ echo performance > /sys/devices/system/cpu/cpufreq/policy0/scaling_governor
 
 ### Watchdog
 
-If the Tailscale tunnel goes down, LAN clients lose internet. A simple watchdog cron job:
+If the active exit node stops working, a watchdog script can switch to a fallback exit node.
+
+Create `/etc/tailscale-watchdog.sh`:
 
 ```bash
 cat << 'EOF' > /etc/tailscale-watchdog.sh
 #!/bin/sh
-# If internet is unreachable via exit node, reconnect
-if ! ping -c 2 -W 5 1.1.1.1 > /dev/null 2>&1; then
-    logger -t tailscale-watchdog "Connection lost, reconnecting..."
-    tailscale set --exit-node=
-    sleep 5
-    tailscale set --exit-node=<HOSTNAME>
+PRIMARY_EXIT_NODE="<PRIMARY_HOSTNAME>"
+FALLBACK_EXIT_NODE="<FALLBACK_HOSTNAME>"
+TEST_URL="https://ifconfig.me/ip"
+
+set_exit_node() {
+    tailscale set --exit-node="$1" --exit-node-allow-lan-access=true
+}
+
+if wget -qO- "$TEST_URL" >/dev/null 2>&1; then
+    exit 0
 fi
+
+logger -t tailscale-watchdog "Primary path failed, switching to fallback exit node"
+set_exit_node "$FALLBACK_EXIT_NODE"
+sleep 10
+
+if wget -qO- "$TEST_URL" >/dev/null 2>&1; then
+    exit 0
+fi
+
+logger -t tailscale-watchdog "Fallback exit node failed, retrying primary exit node"
+set_exit_node "$PRIMARY_EXIT_NODE"
 EOF
 chmod +x /etc/tailscale-watchdog.sh
 ```
 
-Add to crontab (every 5 minutes):
+Test it manually:
+
+```bash
+/etc/tailscale-watchdog.sh
+logread | grep tailscale-watchdog
+tailscale status
+tailscale debug prefs | grep ExitNodeAllowLANAccess
+```
+
+Add it to cron (every 5 minutes):
 
 ```bash
 echo '*/5 * * * * /etc/tailscale-watchdog.sh' >> /etc/crontabs/root
 /etc/init.d/cron restart
 ```
+
+Notes:
+
+- The script checks whether the router can still reach the internet before switching exit nodes.
+- `--exit-node-allow-lan-access=true` is required so LAN clients keep working after the failover.
+- Replace `<PRIMARY_HOSTNAME>` and `<FALLBACK_HOSTNAME>` with the hostnames shown by `tailscale exit-node list`.
 
 ## Performance
 
